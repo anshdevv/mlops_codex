@@ -13,7 +13,7 @@ import json
 import os
 import boto3
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import zipfile
 import numpy as np
 import re
@@ -229,7 +229,7 @@ def get_listings(
     cursor = conn.cursor(dictionary=True)
 
     query = """
-        SELECT prop_type, purpose, covered_area, price, location, beds, baths
+        SELECT id, prop_type, purpose, covered_area, price, location, beds, baths
         FROM property_data
         WHERE 1=1
     """
@@ -263,6 +263,72 @@ def get_listings(
     cursor.close()
     conn.close()
     return data
+
+
+class ListingUpdateRequest(BaseModel):
+    prop_type: str | None = None
+    purpose: str | None = None
+    covered_area: float | None = Field(default=None, ge=0)
+    price: float | None = Field(default=None, ge=0)
+    location: str | None = None
+    beds: int | None = Field(default=None, ge=0)
+    baths: int | None = Field(default=None, ge=0)
+
+
+@app.put("/listings/{listing_id}")
+def update_listing(listing_id: int, payload: ListingUpdateRequest):
+    updates = payload.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="At least one field is required for update.")
+
+    allowed_fields = {"prop_type", "purpose", "covered_area", "price", "location", "beds", "baths"}
+    invalid_fields = [field for field in updates if field not in allowed_fields]
+    if invalid_fields:
+        raise HTTPException(status_code=400, detail=f"Unsupported fields: {', '.join(invalid_fields)}")
+
+    set_clause = ", ".join([f"{field} = %s" for field in updates.keys()])
+    values = list(updates.values()) + [listing_id]
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id FROM property_data WHERE id = %s", (listing_id,))
+        existing = cursor.fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="Listing not found.")
+
+        query = f"UPDATE property_data SET {set_clause} WHERE id = %s"
+        cursor.execute(query, tuple(values))
+        conn.commit()
+
+        cursor.execute(
+            """
+            SELECT id, prop_type, purpose, covered_area, price, location, beds, baths
+            FROM property_data
+            WHERE id = %s
+            """,
+            (listing_id,),
+        )
+        updated = cursor.fetchone()
+        return {"message": "Listing updated successfully.", "listing": updated}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.delete("/listings/{listing_id}")
+def delete_listing(listing_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM property_data WHERE id = %s", (listing_id,))
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Listing not found.")
+        return {"message": "Listing deleted successfully.", "id": listing_id}
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @app.get("/locations")
